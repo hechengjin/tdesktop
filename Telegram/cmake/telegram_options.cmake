@@ -4,12 +4,10 @@
 # For license and copyright information please follow this link:
 # https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
+option(TDESKTOP_USE_FONTCONFIG_FALLBACK "Use custom fonts.conf (Linux only)." OFF)
 option(TDESKTOP_FORCE_GTK_FILE_DIALOG "Force using GTK file dialog (Linux only)." OFF)
 option(TDESKTOP_DISABLE_REGISTER_CUSTOM_SCHEME "Disable automatic 'tg://' URL scheme handler registration." ${DESKTOP_APP_USE_PACKAGED})
 option(TDESKTOP_DISABLE_NETWORK_PROXY "Disable all code for working through Socks5 or MTProxy." OFF)
-option(TDESKTOP_DISABLE_DESKTOP_FILE_GENERATION "Disable automatic '.desktop' file generation (Linux only)." ${DESKTOP_APP_USE_PACKAGED})
-option(TDESKTOP_DISABLE_GTK_INTEGRATION "Disable all code for GTK integration (Linux only)." ON)
-option(TDESKTOP_DISABLE_DBUS_INTEGRATION "Disable all code for D-Bus integration (Linux only)." OFF)
 option(TDESKTOP_USE_PACKAGED_TGVOIP "Find libtgvoip using CMake instead of bundled one." ${DESKTOP_APP_USE_PACKAGED})
 option(TDESKTOP_API_TEST "Use test API credentials." OFF)
 set(TDESKTOP_API_ID "0" CACHE STRING "Provide 'api_id' for the Telegram API access.")
@@ -44,12 +42,12 @@ if (TDESKTOP_API_ID STREQUAL "0" OR TDESKTOP_API_HASH STREQUAL "")
     " ")
 endif()
 
-if (NOT DESKTOP_APP_SPECIAL_TARGET STREQUAL "")
+if (NOT DESKTOP_APP_USE_PACKAGED)
     set(TDESKTOP_FORCE_GTK_FILE_DIALOG ON)
 endif()
 
-if (TDESKTOP_FORCE_GTK_FILE_DIALOG)
-    set(TDESKTOP_DISABLE_GTK_INTEGRATION OFF)
+if (NOT TDESKTOP_FORCE_GTK_FILE_DIALOG)
+    set(TDESKTOP_DISABLE_GTK_INTEGRATION ON)
 endif()
 
 if (DESKTOP_APP_DISABLE_SPELLCHECK)
@@ -58,12 +56,16 @@ else()
     target_link_libraries(Telegram PRIVATE desktop-app::lib_spellcheck)
 endif()
 
-if (disable_autoupdate)
+if (DESKTOP_APP_DISABLE_AUTOUPDATE)
     target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_AUTOUPDATE)
 endif()
 
 if (DESKTOP_APP_SPECIAL_TARGET)
     target_compile_definitions(Telegram PRIVATE TDESKTOP_ALLOW_CLOSED_ALPHA)
+endif()
+
+if (TDESKTOP_USE_FONTCONFIG_FALLBACK)
+    target_compile_definitions(Telegram PRIVATE TDESKTOP_USE_FONTCONFIG_FALLBACK)
 endif()
 
 if (TDESKTOP_FORCE_GTK_FILE_DIALOG)
@@ -78,15 +80,11 @@ if (TDESKTOP_DISABLE_NETWORK_PROXY)
     target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_NETWORK_PROXY)
 endif()
 
-if (TDESKTOP_DISABLE_DESKTOP_FILE_GENERATION)
-    target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_DESKTOP_FILE_GENERATION)
-endif()
-
 if (TDESKTOP_DISABLE_GTK_INTEGRATION)
     target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_GTK_INTEGRATION)
 endif()
 
-if (TDESKTOP_DISABLE_DBUS_INTEGRATION)
+if (DESKTOP_APP_DISABLE_DBUS_INTEGRATION)
     target_compile_definitions(Telegram PRIVATE TDESKTOP_DISABLE_DBUS_INTEGRATION)
 endif()
 

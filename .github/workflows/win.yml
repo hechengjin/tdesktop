@@ -30,25 +30,22 @@ jobs:
       ONLY_CACHE: "false"
       MANUAL_CACHING: "2"
       DOC_PATH: "docs/building-msvc.md"
+      AUTO_CACHING: "1"
+
     steps:
       - name: Get repository name.
         shell: bash
         run: echo ::set-env name=REPO_NAME::${GITHUB_REPOSITORY##*/}
 
       - name: Clone.
-        uses: actions/checkout@v1
+        uses: actions/checkout@v2
         with:
           submodules: recursive
+          path: ${{ env.REPO_NAME }}
 
       - name: Set up environment variables.
         shell: cmd
         run: |
-          cd ..
-          move %REPO_NAME% temp
-          mkdir %REPO_NAME%
-          move temp %REPO_NAME%/%REPO_NAME%
-          cd %REPO_NAME%
-
           echo ::add-path::C:\Strawberry\perl\bin\
           echo ::add-path::"%programfiles%\NASM"
 
@@ -69,6 +66,10 @@ jobs:
       - name: Generate cache key.
         shell: bash
         run: |
+          if [ "$AUTO_CACHING" == "1" ]; then
+            thisFile=$REPO_NAME/.github/workflows/win.yml
+            echo `md5sum $thisFile | awk '{ print $1 }'` >> CACHE_KEY.txt
+          fi
           echo ::set-env name=CACHE_KEY::`md5sum CACHE_KEY.txt | awk '{ print $1 }'`
 
       - name: Choco installs.
@@ -344,6 +345,7 @@ jobs:
 
       - name: Move artifact.
         if: env.UPLOAD_ARTIFACT == 'true'
+        shell: cmd
         run: |
           cd %REPO_NAME%\out\Debug
           mkdir artifact

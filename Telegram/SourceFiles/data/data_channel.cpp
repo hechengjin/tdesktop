@@ -14,6 +14,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_session.h"
 #include "data/data_folder.h"
 #include "data/data_location.h"
+#include "data/data_histories.h"
 #include "base/unixtime.h"
 #include "history/history.h"
 #include "observer_peer.h"
@@ -84,6 +85,12 @@ void ChannelData::setPhoto(PhotoId photoId, const MTPChatPhoto &photo) {
 
 void ChannelData::setName(const QString &newName, const QString &newUsername) {
 	updateNameDelayed(newName.isEmpty() ? name : newName, QString(), newUsername);
+}
+
+void ChannelData::setAccessHash(uint64 accessHash) {
+	access = accessHash;
+	input = MTP_inputPeerChannel(MTP_int(bareId()), MTP_long(accessHash));
+	inputChannel = MTP_inputChannel(MTP_int(bareId()), MTP_long(accessHash));
 }
 
 void ChannelData::setInviteLink(const QString &newInviteLink) {
@@ -337,6 +344,20 @@ bool ChannelData::isGroupAdmin(not_null<UserData*> user) const {
 		return info->admins.contains(peerToUser(user->id));
 	}
 	return false;
+}
+
+bool ChannelData::lastParticipantsRequestNeeded() const {
+	if (!mgInfo) {
+		return false;
+	} else if (mgInfo->lastParticipantsCount == membersCount()) {
+		mgInfo->lastParticipantsStatus
+			&= ~MegagroupInfo::LastParticipantsCountOutdated;
+	}
+	return mgInfo->lastParticipants.empty()
+		|| !(mgInfo->lastParticipantsStatus
+			& MegagroupInfo::LastParticipantsOnceReceived)
+		|| (mgInfo->lastParticipantsStatus
+			& MegagroupInfo::LastParticipantsCountOutdated);
 }
 
 auto ChannelData::unavailableReasons() const
@@ -688,13 +709,14 @@ void ApplyChannelUpdate(
 		const auto folder = folderId
 			? channel->owner().folderLoaded(folderId)
 			: nullptr;
+		auto &histories = channel->owner().histories();
 		if (folder && history->folder() != folder) {
 			// If history folder is unknown or not synced, request both.
-			channel->session().api().requestDialogEntry(history);
-			channel->session().api().requestDialogEntry(folder);
+			histories.requestDialogEntry(history);
+			histories.requestDialogEntry(folder);
 		} else if (!history->folderKnown()
 			|| channel->pts() != update.vpts().v) {
-			channel->session().api().requestDialogEntry(history);
+			histories.requestDialogEntry(history);
 		} else {
 			history->applyDialogFields(
 				history->folder(),
@@ -740,6 +762,9 @@ void ApplyChannelUpdate(
 	channel->session().api().applyNotifySettings(
 		MTP_inputNotifyPeer(channel->input),
 		update.vnotify_settings());
+
+	// For clearUpTill() call.
+	channel->owner().sendHistoryChangeNotifications();
 }
 
 void ApplyMegagroupAdmins(

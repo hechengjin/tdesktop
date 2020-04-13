@@ -24,6 +24,7 @@ bool InSandbox();
 bool InSnap();
 
 bool IsXDGDesktopPortalPresent();
+bool UseXDGDesktopPortal();
 
 QString ProcessNameByPID(const QString &pid);
 QString CurrentExecutablePath(int argc, char *argv[]);
@@ -34,12 +35,13 @@ QString SingleInstanceLocalServerName(const QString &hash);
 QString GetLauncherBasename();
 QString GetLauncherFilename();
 
-inline std::optional<crl::time> LastUserInputTime() {
-	return std::nullopt;
-}
+QString GetIconName();
 
 inline void IgnoreApplicationActivationRightNow() {
 }
+
+void FallbackFontConfigCheckBegin();
+void FallbackFontConfigCheckEnd();
 
 } // namespace Platform
 

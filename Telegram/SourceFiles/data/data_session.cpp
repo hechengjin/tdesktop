@@ -44,10 +44,12 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_web_page.h"
 #include "data/data_game.h"
 #include "data/data_poll.h"
+#include "data/data_chat_filters.h"
 #include "data/data_scheduled_messages.h"
 #include "data/data_cloud_themes.h"
 #include "data/data_streaming.h"
 #include "data/data_media_rotation.h"
+#include "data/data_histories.h"
 #include "base/platform/base_platform_info.h"
 #include "base/unixtime.h"
 #include "base/call_delayed.h"
@@ -182,7 +184,7 @@ Session::Session(not_null<Main::Session*> session)
 , _bigFileCache(Core::App().databases().get(
 	Local::cacheBigFilePath(),
 	Local::cacheBigFileSettings()))
-, _chatsList(PinnedDialogsCountMaxValue(session))
+, _chatsList(FilterId(), PinnedDialogsCountMaxValue(session))
 , _contactsList(Dialogs::SortMode::Name)
 , _contactsNoChatsList(Dialogs::SortMode::Name)
 , _selfDestructTimer([=] { checkSelfDestructItems(); })
@@ -191,10 +193,12 @@ Session::Session(not_null<Main::Session*> session)
 })
 , _unmuteByFinishedTimer([=] { unmuteByFinished(); })
 , _groups(this)
+, _chatsFilters(std::make_unique<ChatFilters>(this))
 , _scheduledMessages(std::make_unique<ScheduledMessages>(this))
 , _cloudThemes(std::make_unique<CloudThemes>(session))
 , _streaming(std::make_unique<Streaming>(this))
-, _mediaRotation(std::make_unique<MediaRotation>()) {
+, _mediaRotation(std::make_unique<MediaRotation>())
+, _histories(std::make_unique<Histories>(this)) {
 	_cache->open(Local::cacheKey());
 	_bigFileCache->open(Local::cacheBigFileKey());
 
@@ -210,14 +214,17 @@ Session::Session(not_null<Main::Session*> session)
 	setupChannelLeavingViewer();
 	setupPeerNameViewer();
 	setupUserIsContactViewer();
+
+	_chatsList.unreadStateChanges(
+	) | rpl::start_with_next([] {
+		Notify::unreadCounterUpdated();
+	}, _lifetime);
 }
 
 void Session::clear() {
 	_sendActions.clear();
 
-	for (const auto &[peerId, history] : _histories) {
-		history->clear(History::ClearType::Unload);
-	}
+	_histories->unloadAll();
 	_scheduledMessages = nullptr;
 	_dependentMessages.clear();
 	base::take(_messages);
@@ -227,7 +234,13 @@ void Session::clear() {
 	cSetRecentInlineBots(RecentInlineBots());
 	cSetRecentStickers(RecentStickerPack());
 	App::clearMousedItems();
-	_histories.clear();
+	_histories->clearAll();
+	_webpages.clear();
+	_locations.clear();
+	_polls.clear();
+	_games.clear();
+	_documents.clear();
+	_photos.clear();
 }
 
 not_null<PeerData*> Session::peer(PeerId id) {
@@ -519,11 +532,7 @@ not_null<PeerData*> Session::processChat(const MTPChat &data) {
 				const auto channel = this->channel(input.vchannel_id().v);
 				channel->addFlags(MTPDchannel::Flag::f_megagroup);
 				if (!channel->access) {
-					channel->input = MTP_inputPeerChannel(
-						input.vchannel_id(),
-						input.vaccess_hash());
-					channel->inputChannel = *migratedTo;
-					channel->access = input.vaccess_hash().v;
+					channel->setAccessHash(input.vaccess_hash().v);
 				}
 				ApplyMigration(chat, channel);
 			}, [](const MTPDinputChannelFromMessage &) {
@@ -566,10 +575,6 @@ not_null<PeerData*> Session::processChat(const MTPChat &data) {
 			if (result->loadedStatus != PeerData::FullLoaded) {
 				LOG(("API Warning: not loaded minimal channel applied."));
 			}
-		} else {
-			channel->input = MTP_inputPeerChannel(
-				data.vid(),
-				MTP_long(data.vaccess_hash().value_or_empty()));
 		}
 
 		const auto wasInChannel = channel->amIn();
@@ -605,11 +610,8 @@ not_null<PeerData*> Session::processChat(const MTPChat &data) {
 				channel->setRestrictions(
 					MTP_chatBannedRights(MTP_flags(0), MTP_int(0)));
 			}
-			const auto hash = data.vaccess_hash().value_or(channel->access);
-			channel->inputChannel = MTP_inputChannel(
-				data.vid(),
-				MTP_long(hash));
-			channel->access = hash;
+			channel->setAccessHash(
+				data.vaccess_hash().value_or(channel->access));
 			channel->date = data.vdate().v;
 			if (channel->version() < data.vversion().v) {
 				channel->setVersion(data.vversion().v);
@@ -644,14 +646,11 @@ not_null<PeerData*> Session::processChat(const MTPChat &data) {
 		}
 	}, [&](const MTPDchannelForbidden &data) {
 		const auto channel = result->asChannel();
-		channel->input = MTP_inputPeerChannel(data.vid(), data.vaccess_hash());
 
 		auto wasInChannel = channel->amIn();
 		auto canViewAdmins = channel->canViewAdmins();
 		auto canViewMembers = channel->canViewMembers();
 		auto canAddMembers = channel->canAddMembers();
-
-		channel->inputChannel = MTP_inputChannel(data.vid(), data.vaccess_hash());
 
 		auto mask = mtpCastFlags(MTPDchannelForbidden::Flag::f_broadcast | MTPDchannelForbidden::Flag::f_megagroup);
 		channel->setFlags((channel->flags() & ~mask) | (mtpCastFlags(data.vflags()) & mask) | MTPDchannel_ClientFlag::f_forbidden);
@@ -665,7 +664,7 @@ not_null<PeerData*> Session::processChat(const MTPChat &data) {
 
 		channel->setName(qs(data.vtitle()), QString());
 
-		channel->access = data.vaccess_hash().v;
+		channel->setAccessHash(data.vaccess_hash().v);
 		channel->setPhoto(MTP_chatPhotoEmpty());
 		channel->date = 0;
 		channel->setMembersCount(0);
@@ -768,20 +767,11 @@ void Session::enumerateChannels(
 }
 
 not_null<History*> Session::history(PeerId peerId) {
-	Expects(peerId != 0);
-
-	if (const auto result = historyLoaded(peerId)) {
-		return result;
-	}
-	const auto [i, ok] = _histories.emplace(
-		peerId,
-		std::make_unique<History>(this, peerId));
-	return i->second.get();
+	return _histories->findOrCreate(peerId);
 }
 
 History *Session::historyLoaded(PeerId peerId) const {
-	const auto i = peerId ? _histories.find(peerId) : end(_histories);
-	return (i != end(_histories)) ? i->second.get() : nullptr;
+	return _histories->find(peerId);
 }
 
 not_null<History*> Session::history(not_null<const PeerData*> peer) {
@@ -796,7 +786,7 @@ void Session::deleteConversationLocally(not_null<PeerData*> peer) {
 	const auto history = historyLoaded(peer);
 	if (history) {
 		if (history->folderKnown()) {
-			setChatPinned(history, false);
+			setChatPinned(history, FilterId(), false);
 		}
 		App::main()->removeDialog(history);
 		history->clear(peer->isChannel()
@@ -854,7 +844,7 @@ void Session::chatsListChanged(Data::Folder *folder) {
 
 void Session::chatsListDone(Data::Folder *folder) {
 	if (folder) {
-		folder->setChatsListLoaded();
+		folder->chatsList()->setLoaded();
 	} else {
 		_chatsList.setLoaded();
 	}
@@ -1475,11 +1465,16 @@ MessageIdsList Session::itemOrItsGroup(not_null<HistoryItem*> item) const {
 	return { 1, item->fullId() };
 }
 
-void Session::setChatPinned(const Dialogs::Key &key, bool pinned) {
+void Session::setChatPinned(
+		const Dialogs::Key &key,
+		FilterId filterId,
+		bool pinned) {
 	Expects(key.entry()->folderKnown());
 
-	const auto list = chatsList(key.entry()->folder())->pinned();
-	list->setPinned(key, pinned);
+	const auto list = filterId
+		? chatsFilters().chatsList(filterId)
+		: chatsList(key.entry()->folder());
+	list->pinned()->setPinned(key, pinned);
 	notifyPinnedDialogsOrderUpdated();
 }
 
@@ -1527,7 +1522,7 @@ void Session::applyDialogs(
 		});
 	}
 	if (requestFolder && count) {
-		requestFolder->setCloudChatsListSize(*count);
+		requestFolder->chatsList()->setCloudListSize(*count);
 	}
 }
 
@@ -1539,7 +1534,7 @@ void Session::applyDialog(
 		return;
 	}
 
-	const auto history = session().data().history(peerId);
+	const auto history = this->history(peerId);
 	history->applyDialog(requestFolder, data);
 	setPinnedFromDialog(history, data.is_pinned());
 
@@ -1565,19 +1560,39 @@ void Session::applyDialog(
 	setPinnedFromDialog(folder, data.is_pinned());
 }
 
-int Session::pinnedChatsCount(Data::Folder *folder) const {
-	return pinnedChatsOrder(folder).size();
+int Session::pinnedChatsCount(
+		Data::Folder *folder,
+		FilterId filterId) const {
+	if (!filterId) {
+		return pinnedChatsOrder(folder, filterId).size();
+	}
+	const auto &list = chatsFilters().list();
+	const auto i = ranges::find(list, filterId, &Data::ChatFilter::id);
+	return (i != end(list)) ? i->pinned().size() : 0;
 }
 
-int Session::pinnedChatsLimit(Data::Folder *folder) const {
-	return folder
-		? Global::PinnedDialogsInFolderMax()
-		: Global::PinnedDialogsCountMax();
+int Session::pinnedChatsLimit(
+		Data::Folder *folder,
+		FilterId filterId) const {
+	if (!filterId) {
+		return folder
+			? Global::PinnedDialogsInFolderMax()
+			: Global::PinnedDialogsCountMax();
+	}
+	const auto &list = chatsFilters().list();
+	const auto i = ranges::find(list, filterId, &Data::ChatFilter::id);
+	const auto pinned = (i != end(list)) ? i->pinned().size() : 0;
+	const auto already = (i != end(list)) ? i->always().size() : 0;
+	return Data::ChatFilter::kPinnedLimit + pinned - already;
 }
 
 const std::vector<Dialogs::Key> &Session::pinnedChatsOrder(
-		Data::Folder *folder) const {
-	return chatsList(folder)->pinned()->order();
+		Data::Folder *folder,
+		FilterId filterId) const {
+	const auto list = filterId
+		? chatsFilters().chatsList(filterId)
+		: chatsList(folder);
+	return list->pinned()->order();
 }
 
 void Session::clearPinnedChats(Data::Folder *folder) {
@@ -1585,12 +1600,16 @@ void Session::clearPinnedChats(Data::Folder *folder) {
 }
 
 void Session::reorderTwoPinnedChats(
+		FilterId filterId,
 		const Dialogs::Key &key1,
 		const Dialogs::Key &key2) {
 	Expects(key1.entry()->folderKnown() && key2.entry()->folderKnown());
-	Expects(key1.entry()->folder() == key2.entry()->folder());
+	Expects(filterId || (key1.entry()->folder() == key2.entry()->folder()));
 
-	chatsList(key1.entry()->folder())->pinned()->reorder(key1, key2);
+	const auto list = filterId
+		? chatsFilters().chatsList(filterId)
+		: chatsList(key1.entry()->folder());
+	list->pinned()->reorder(key1, key2);
 	notifyPinnedDialogsOrderUpdated();
 }
 
@@ -1733,18 +1752,15 @@ auto Session::messagesListForInsert(ChannelId channelId)
 		: &_channelMessages[channelId];
 }
 
-HistoryItem *Session::registerMessage(std::unique_ptr<HistoryItem> item) {
-	Expects(item != nullptr);
-
-	const auto result = item.get();
-	const auto list = messagesListForInsert(result->channelId());
-	const auto i = list->find(result->id);
+void Session::registerMessage(not_null<HistoryItem*> item) {
+	const auto list = messagesListForInsert(item->channelId());
+	const auto itemId = item->id;
+	const auto i = list->find(itemId);
 	if (i != list->end()) {
 		LOG(("App Error: Trying to re-registerMessage()."));
 		i->second->destroy();
 	}
-	list->emplace(result->id, std::move(item));
-	return result;
+	list->emplace(itemId, item);
 }
 
 void Session::processMessagesDeleted(
@@ -1763,7 +1779,7 @@ void Session::processMessagesDeleted(
 		const auto i = list ? list->find(messageId.v) : Messages::iterator();
 		if (list && i != list->end()) {
 			const auto history = i->second->history();
-			destroyMessage(i->second.get());
+			i->second->destroy();
 			if (!history->chatListMessageKnown()) {
 				historiesToCheck.emplace(history);
 			}
@@ -1789,32 +1805,12 @@ void Session::removeDependencyMessage(not_null<HistoryItem*> item) {
 	}
 }
 
-void Session::destroyMessage(not_null<HistoryItem*> item) {
-	Expects(item->isHistoryEntry() || !item->mainView());
-
+void Session::unregisterMessage(not_null<HistoryItem*> item) {
 	const auto peerId = item->history()->peer->id;
-	if (item->isHistoryEntry()) {
-		// All this must be done for all items manually in History::clear()!
-		item->eraseFromUnreadMentions();
-		if (IsServerMsgId(item->id)) {
-			if (const auto types = item->sharedMediaTypes()) {
-				session().storage().remove(Storage::SharedMediaRemoveOne(
-					peerId,
-					types,
-					item->id));
-			}
-		} else {
-			session().api().cancelLocalItem(item);
-		}
-		item->history()->itemRemoved(item);
-	}
 	_itemRemoved.fire_copy(item);
 	groups().unregisterMessage(item);
 	removeDependencyMessage(item);
-	session().notifications().clearFromItem(item);
-
-	const auto list = messagesListForInsert(peerToChannel(peerId));
-	list->erase(item->id);
+	messagesListForInsert(peerToChannel(peerId))->erase(item->id);
 }
 
 MsgId Session::nextLocalMessageId() {
@@ -2058,35 +2054,6 @@ bool Session::computeUnreadBadgeMuted(
 		&& (_session->settings().countUnreadMessages()
 			? (state.messagesMuted >= state.messages)
 			: (state.chatsMuted >= state.chats));
-}
-
-void Session::unreadStateChanged(
-		const Dialogs::Key &key,
-		const Dialogs::UnreadState &wasState) {
-	Expects(key.entry()->folderKnown());
-	Expects(key.entry()->inChatList());
-
-	const auto nowState = key.entry()->chatListUnreadState();
-	if (const auto folder = key.entry()->folder()) {
-		folder->unreadStateChanged(key, wasState, nowState);
-	} else {
-		_chatsList.unreadStateChanged(wasState, nowState);
-	}
-	Notify::unreadCounterUpdated();
-}
-
-void Session::unreadEntryChanged(const Dialogs::Key &key, bool added) {
-	Expects(key.entry()->folderKnown());
-
-	const auto state = key.entry()->chatListUnreadState();
-	if (!state.empty()) {
-		if (const auto folder = key.entry()->folder()) {
-			folder->unreadEntryChanged(key, state, added);
-		} else {
-			_chatsList.unreadEntryChanged(state, added);
-		}
-	}
-	Notify::unreadCounterUpdated();
 }
 
 void Session::selfDestructIn(not_null<HistoryItem*> item, crl::time delay) {
@@ -3387,31 +3354,50 @@ not_null<Dialogs::IndexedList*> Session::contactsNoChatsList() {
 	return &_contactsNoChatsList;
 }
 
-auto Session::refreshChatListEntry(Dialogs::Key key)
+auto Session::refreshChatListEntry(
+	Dialogs::Key key,
+	FilterId filterIdForResult)
 -> RefreshChatListEntryResult {
+	Expects(key.entry()->folderKnown());
+
 	using namespace Dialogs;
 
 	const auto entry = key.entry();
-	auto result = RefreshChatListEntryResult();
-	result.changed = !entry->inChatList();
-	if (result.changed) {
-		const auto mainRow = entry->addToChatList(Mode::All);
+	const auto history = key.history();
+	const auto mainList = chatsList(entry->folder());
+	auto mainListResult = RefreshChatListEntryResult();
+	mainListResult.changed = !entry->inChatList();
+	if (mainListResult.changed) {
+		const auto mainRow = entry->addToChatList(0, mainList);
 		_contactsNoChatsList.del(key, mainRow);
 	} else {
-		result.moved = entry->adjustByPosInChatList(Mode::All);
+		mainListResult.moved = entry->adjustByPosInChatList(0, mainList);
 	}
-	if (Global::DialogsModeEnabled()) {
-		if (entry->toImportant()) {
-			result.importantChanged = !entry->inChatList(Mode::Important);
-			if (result.importantChanged) {
-				entry->addToChatList(Mode::Important);
+	auto result = filterIdForResult
+		? RefreshChatListEntryResult()
+		: mainListResult;
+	if (!history) {
+		return result;
+	}
+	for (const auto &filter : _chatsFilters->list()) {
+		const auto id = filter.id();
+		const auto filterList = chatsFilters().chatsList(id);
+		auto filterResult = RefreshChatListEntryResult();
+		if (filter.contains(history)) {
+			filterResult.changed = !entry->inChatList(id);
+			if (filterResult.changed) {
+				entry->addToChatList(id, filterList);
 			} else {
-				result.importantMoved = entry->adjustByPosInChatList(
-					Mode::Important);
+				filterResult.moved = entry->adjustByPosInChatList(
+					id,
+					filterList);
 			}
-		} else if (entry->inChatList(Mode::Important)) {
-			entry->removeFromChatList(Mode::Important);
-			result.importantChanged = true;
+		} else if (entry->inChatList(id)) {
+			entry->removeFromChatList(id, filterList);
+			filterResult.changed = true;
+		}
+		if (id == filterIdForResult) {
+			result = filterResult;
 		}
 	}
 	return result;
@@ -3421,9 +3407,17 @@ void Session::removeChatListEntry(Dialogs::Key key) {
 	using namespace Dialogs;
 
 	const auto entry = key.entry();
-	entry->removeFromChatList(Mode::All);
-	if (Global::DialogsModeEnabled()) {
-		entry->removeFromChatList(Mode::Important);
+	if (!entry->inChatList()) {
+		return;
+	}
+	Assert(entry->folderKnown());
+	const auto mainList = chatsList(entry->folder());
+	entry->removeFromChatList(0, mainList);
+	for (const auto &filter : _chatsFilters->list()) {
+		const auto id = filter.id();
+		if (entry->inChatList(id)) {
+			entry->removeFromChatList(id, chatsFilters().chatsList(id));
+		}
 	}
 	if (_contactsList.contains(key)) {
 		if (!_contactsNoChatsList.contains(key)) {
@@ -3629,7 +3623,7 @@ void Session::serviceNotification(
 	}
 	const auto history = this->history(PeerData::kServiceNotificationsId);
 	if (!history->folderKnown()) {
-		_session->api().requestDialogEntry(history, [=] {
+		histories().requestDialogEntry(history, [=] {
 			insertCheckedServiceNotification(message, media, date);
 		});
 	} else {

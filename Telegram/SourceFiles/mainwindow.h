@@ -62,8 +62,7 @@ public:
 
 	MainWidget *mainWidget();
 
-	bool doWeReadServerHistory();
-	bool doWeReadMentions();
+	[[nodiscard]] bool doWeMarkAsRead();
 
 	void activate();
 
@@ -119,6 +118,8 @@ public:
 		not_null<PhotoData*> photo);
 	void hideMediaPreview();
 
+	void updateControlsGeometry() override;
+
 protected:
 	bool eventFilter(QObject *o, QEvent *e) override;
 	void closeEvent(QCloseEvent *e) override;
@@ -126,8 +127,6 @@ protected:
 	void initHook() override;
 	void updateIsActiveHook() override;
 	void clearWidgetsHook() override;
-
-	void updateControlsGeometry() override;
 
 public slots:
 	void showSettings();
@@ -168,6 +167,7 @@ private:
 	QImage icon16, icon32, icon64, iconbig16, iconbig32, iconbig64;
 
 	crl::time _lastTrayClickTime = 0;
+	QPoint _lastMousePosition;
 
 	object_ptr<Window::PasscodeLockWidget> _passcodeLock = { nullptr };
 	object_ptr<Intro::Widget> _intro = { nullptr };

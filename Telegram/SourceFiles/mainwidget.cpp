@@ -22,8 +22,10 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "data/data_channel.h"
 #include "data/data_chat.h"
 #include "data/data_user.h"
+#include "data/data_chat_filters.h"
 #include "data/data_scheduled_messages.h"
 #include "data/data_file_origin.h"
+#include "data/data_histories.h"
 #include "api/api_text_entities.h"
 #include "ui/special_buttons.h"
 #include "ui/widgets/buttons.h"
@@ -780,10 +782,6 @@ bool MainWidget::notify_switchInlineBotButtonReceived(const QString &query, User
 
 void MainWidget::notify_userIsBotChanged(UserData *bot) {
 	_history->notify_userIsBotChanged(bot);
-}
-
-void MainWidget::notify_historyMuteUpdated(History *history) {
-	_dialogs->notify_historyMuteUpdated(history);
 }
 
 void MainWidget::clearHider(not_null<Window::HistoryHider*> instance) {
@@ -1898,8 +1896,8 @@ void MainWidget::showNewSection(
 	using Column = Window::Column;
 
 	auto saveInStack = (params.way == SectionShow::Way::Forward);
-	auto thirdSectionTop = getThirdSectionTop();
-	auto newThirdGeometry = QRect(
+	const auto thirdSectionTop = getThirdSectionTop();
+	const auto newThirdGeometry = QRect(
 		width() - st::columnMinimalWidthThird,
 		thirdSectionTop,
 		st::columnMinimalWidthThird,
@@ -1911,9 +1909,10 @@ void MainWidget::showNewSection(
 			Column::Third,
 			newThirdGeometry)
 		: nullptr;
+	const auto layerRect = parentWidget()->rect();
 	if (newThirdSection) {
 		saveInStack = false;
-	} else if (auto layer = memento.createLayer(_controller, rect())) {
+	} else if (auto layer = memento.createLayer(_controller, layerRect)) {
 		if (params.activation != anim::activation::background) {
 			Ui::hideLayer(anim::type::instant);
 		}
@@ -2182,9 +2181,9 @@ QPixmap MainWidget::grabForShowAnimation(const Window::SectionSlideParams &param
 }
 
 void MainWidget::repaintDialogRow(
-		Dialogs::Mode list,
+		FilterId filterId,
 		not_null<Dialogs::Row*> row) {
-	_dialogs->repaintDialogRow(list, row);
+	_dialogs->repaintDialogRow(filterId, row);
 }
 
 void MainWidget::repaintDialogRow(Dialogs::RowDescriptor row) {
@@ -2217,10 +2216,8 @@ void MainWidget::dialogsToUp() {
 	_dialogs->jumpToTop();
 }
 
-void MainWidget::markActiveHistoryAsRead() {
-	if (const auto activeHistory = _history->history()) {
-		session().api().readServerHistory(activeHistory);
-	}
+void MainWidget::checkHistoryActivation() {
+	_history->checkHistoryActivation();
 }
 
 void MainWidget::showAnimated(const QPixmap &bgAnimCache, bool back) {
@@ -3519,15 +3516,8 @@ bool MainWidget::isActive() const {
 	return !_isIdle && isVisible() && !_a_show.animating();
 }
 
-bool MainWidget::doWeReadServerHistory() const {
-	return isActive()
-		&& !session().supportMode()
-		&& !_mainSection
-		&& _history->doWeReadServerHistory();
-}
-
-bool MainWidget::doWeReadMentions() const {
-	return isActive() && !_mainSection && _history->doWeReadMentions();
+bool MainWidget::doWeMarkAsRead() const {
+	return isActive() && !_mainSection;
 }
 
 bool MainWidget::lastWasOnline() const {
@@ -4036,7 +4026,7 @@ void MainWidget::feedUpdate(const MTPUpdate &update) {
 	//				d.vunread_count()->v,
 	//				d.vunread_muted_count()->v);
 	//		} else {
-	//			session().api().requestDialogEntry(feed);
+	//			session().data().histories().requestDialogEntry(feed);
 	//		}
 	//	}
 	//} break;
@@ -4061,6 +4051,12 @@ void MainWidget::feedUpdate(const MTPUpdate &update) {
 		const auto &data = update.c_updateFolderPeers();
 
 		ptsUpdateAndApply(data.vpts().v, data.vpts_count().v, update);
+	} break;
+
+	case mtpc_updateDialogFilter:
+	case mtpc_updateDialogFilterOrder:
+	case mtpc_updateDialogFilters: {
+		session().data().chatsFilters().apply(update);
 	} break;
 
 	// Deleted messages.
@@ -4412,7 +4408,7 @@ void MainWidget::feedUpdate(const MTPUpdate &update) {
 			session().api().requestPinnedDialogs(folder);
 		}
 		if (!loaded) {
-			session().api().requestDialogEntry(folder);
+			session().data().histories().requestDialogEntry(folder);
 		}
 	} break;
 
@@ -4470,12 +4466,12 @@ void MainWidget::feedUpdate(const MTPUpdate &update) {
 				//if (const auto feed = channel->feed()) { // #feed
 				//	feed->requestChatListMessage();
 				//	if (!feed->unreadCountKnown()) {
-				//		feed->session().api().requestDialogEntry(feed);
+				//		feed->owner().histories().requestDialogEntry(feed);
 				//	}
 				//} else {
 					history->requestChatListMessage();
 					if (!history->unreadCountKnown()) {
-						history->session().api().requestDialogEntry(history);
+						history->owner().histories().requestDialogEntry(history);
 					}
 				//}
 				if (!channel->amCreator()) {

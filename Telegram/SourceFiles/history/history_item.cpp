@@ -75,8 +75,7 @@ not_null<HistoryItem*> CreateUnsupportedMessage(
 		EntityInText(EntityType::Italic, 0, text.text.size()));
 	flags &= ~MTPDmessage::Flag::f_post_author;
 	flags |= MTPDmessage::Flag::f_legacy;
-	return history->owner().makeMessage(
-		history,
+	return history->makeMessage(
 		msgId,
 		flags,
 		clientFlags,
@@ -153,6 +152,8 @@ MediaCheckResult CheckMessageMedia(const MTPMessageMedia &media) {
 	}, [](const MTPDmessageMediaInvoice &) {
 		return Result::Good;
 	}, [](const MTPDmessageMediaPoll &) {
+		return Result::Good;
+	}, [](const MTPDmessageMediaDice &) {
 		return Result::Good;
 	}, [](const MTPDmessageMediaUnsupported &) {
 		return Result::Unsupported;
@@ -413,7 +414,7 @@ bool HistoryItem::isScheduled() const {
 }
 
 void HistoryItem::destroy() {
-	_history->owner().destroyMessage(this);
+	_history->destroyMessage(this);
 }
 
 void HistoryItem::refreshMainView() {
@@ -769,7 +770,9 @@ bool HistoryItem::showNotification() const {
 	if (channel && !channel->amIn()) {
 		return false;
 	}
-	return (out() || _history->peer->isSelf()) ? isFromScheduled() : unread();
+	return (out() || _history->peer->isSelf())
+		? isFromScheduled()
+		: unread();
 }
 
 void HistoryItem::markClientSideAsRead() {
@@ -929,37 +932,29 @@ not_null<HistoryItem*> HistoryItem::Create(
 			const auto text = HistoryService::PreparedText {
 				tr::lng_message_empty(tr::now)
 			};
-			return history->owner().makeServiceMessage(
-				history,
-				clientFlags,
+			return history->makeServiceMessage(
 				data.vid().v,
+				clientFlags,
 				data.vdate().v,
 				text,
 				data.vflags().v,
 				data.vfrom_id().value_or_empty());
 		} else if (checked == MediaCheckResult::HasTimeToLive) {
-			return history->owner().makeServiceMessage(
-				history,
-				data,
-				clientFlags);
+			return history->makeServiceMessage(data, clientFlags);
 		}
-		return history->owner().makeMessage(history, data, clientFlags);
+		return history->makeMessage(data, clientFlags);
 	}, [&](const MTPDmessageService &data) -> HistoryItem* {
 		if (data.vaction().type() == mtpc_messageActionPhoneCall) {
-			return history->owner().makeMessage(history, data, clientFlags);
+			return history->makeMessage(data, clientFlags);
 		}
-		return history->owner().makeServiceMessage(
-			history,
-			data,
-			clientFlags);
+		return history->makeServiceMessage(data, clientFlags);
 	}, [&](const MTPDmessageEmpty &data) -> HistoryItem* {
 		const auto text = HistoryService::PreparedText{
 			tr::lng_message_empty(tr::now)
 		};
-		return history->owner().makeServiceMessage(
-			history,
-			clientFlags,
+		return history->makeServiceMessage(
 			data.vid().v,
+			clientFlags,
 			TimeId(0),
 			text);
 	});

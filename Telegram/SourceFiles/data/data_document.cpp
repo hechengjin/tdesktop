@@ -42,7 +42,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 namespace {
 
-constexpr auto kMemoryForCache = 32 * 1024 * 1024;
+// Updated Mar 3, 2020: Increase the size of the memory cache for media, to prevent items still being displayed from being unloaded.
+constexpr auto kMemoryForCache = 128 * 1024 * 1024; // was 32, updated to 128
 const auto kAnimatedStickerDimensions = QSize(512, 512);
 
 using FilePathResolve = DocumentData::FilePathResolve;
@@ -569,7 +570,7 @@ void DocumentData::validateLottieSticker() {
 void DocumentData::setDataAndCache(const QByteArray &data) {
 	setData(data);
 	if (saveToCache() && data.size() <= Storage::kMaxFileInMemory) {
-		session().data().cache().put(
+		owner().cache().put(
 			cacheKey(),
 			Storage::Cache::Database::TaggedValue(
 				base::duplicate(data),
@@ -1143,9 +1144,11 @@ bool DocumentData::isStickerSetInstalled() const {
 			}
 		}
 		return false;
-	}, [&](const MTPDinputStickerSetEmpty &) {
+	}, [](const MTPDinputStickerSetEmpty &) {
 		return false;
-	}, [&](const MTPDinputStickerSetAnimatedEmoji &) {
+	}, [](const MTPDinputStickerSetAnimatedEmoji &) {
+		return false;
+	}, [](const MTPDinputStickerSetDice &) {
 		return false;
 	});
 }

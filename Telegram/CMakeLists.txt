@@ -38,6 +38,7 @@ include(cmake/lib_tgvoip.cmake)
 set(style_files
     boxes/boxes.style
     calls/calls.style
+    chat_helpers/chat_helpers.style
     dialogs/dialogs.style
     export/view/export.style
     history/history.style
@@ -49,7 +50,7 @@ set(style_files
     passport/passport.style
     profile/profile.style
     settings/settings.style
-    chat_helpers/chat_helpers.style
+    ui/filter_icons.style
     window/window.style
 )
 
@@ -66,23 +67,16 @@ generate_numbers(Telegram ${res_loc}/numbers.txt)
 
 set_target_properties(Telegram PROPERTIES AUTOMOC ON AUTORCC ON)
 
-if (DESKTOP_APP_USE_PACKAGED)
-    set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
-    find_package(Threads)
-
-    target_link_libraries(Telegram
-    PRIVATE
-        ${CMAKE_DL_LIBS}
-        Threads::Threads
-    )
-endif()
-
-if (LINUX AND NOT TDESKTOP_DISABLE_DBUS_INTEGRATION)
+if (LINUX AND NOT DESKTOP_APP_DISABLE_DBUS_INTEGRATION)
     target_link_libraries(Telegram
     PRIVATE
         desktop-app::external_statusnotifieritem
         desktop-app::external_dbusmenu_qt
     )
+endif()
+
+if (add_hunspell_library)
+    target_link_libraries(Telegram PRIVATE desktop-app::external_hunspell)
 endif()
 
 target_link_libraries(Telegram
@@ -101,6 +95,7 @@ PRIVATE
     desktop-app::external_lz4
     desktop-app::external_rlottie
     desktop-app::external_zlib
+    desktop-app::external_minizip
     desktop-app::external_qt
     desktop-app::external_qr_code_generator
     desktop-app::external_crash_reports
@@ -124,11 +119,24 @@ if (NOT HAVE_LONG_ATOMIC_WITHOUT_LIB)
     target_link_libraries(Telegram PRIVATE atomic)
 endif()
 
+if (DESKTOP_APP_USE_PACKAGED)
+    set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
+    find_package(Threads)
+
+    target_link_libraries(Telegram
+    PRIVATE
+        ${CMAKE_DL_LIBS}
+        Threads::Threads
+    )
+endif()
+
 target_precompile_headers(Telegram PRIVATE ${src_loc}/stdafx.h)
 nice_target_sources(Telegram ${src_loc}
 PRIVATE
     ${style_files}
 
+    api/api_chat_filters.cpp
+    api/api_chat_filters.h
     api/api_common.h
     api/api_hash.h
     api/api_self_destruct.cpp
@@ -141,6 +149,10 @@ PRIVATE
     api/api_single_message_search.h
     api/api_text_entities.cpp
     api/api_text_entities.h
+    boxes/filters/edit_filter_box.cpp
+    boxes/filters/edit_filter_box.h
+    boxes/filters/edit_filter_chats_list.cpp
+    boxes/filters/edit_filter_chats_list.h
     boxes/peers/add_participants_box.cpp
     boxes/peers/add_participants_box.h
     boxes/peers/edit_contact_box.cpp
@@ -185,6 +197,8 @@ PRIVATE
     boxes/connection_box.h
     boxes/create_poll_box.cpp
     boxes/create_poll_box.h
+    boxes/dictionaries_manager.cpp
+    boxes/dictionaries_manager.h
     boxes/download_path_box.cpp
     boxes/download_path_box.h
     boxes/edit_caption_box.cpp
@@ -257,10 +271,14 @@ PRIVATE
     chat_helpers/gifs_list_widget.h
     chat_helpers/message_field.cpp
     chat_helpers/message_field.h
+    chat_helpers/spellchecker_common.cpp
+    chat_helpers/spellchecker_common.h
     chat_helpers/stickers.cpp
     chat_helpers/stickers.h
     chat_helpers/stickers_emoji_pack.cpp
     chat_helpers/stickers_emoji_pack.h
+    chat_helpers/stickers_dice_pack.cpp
+    chat_helpers/stickers_dice_pack.h
     chat_helpers/stickers_list_widget.cpp
     chat_helpers/stickers_list_widget.h
     chat_helpers/tabbed_panel.cpp
@@ -311,6 +329,8 @@ PRIVATE
     data/data_auto_download.h
     data/data_chat.cpp
     data/data_chat.h
+    data/data_chat_filters.cpp
+    data/data_chat_filters.h
     data/data_channel.cpp
     data/data_channel.h
     data/data_channel_admins.cpp
@@ -335,6 +355,8 @@ PRIVATE
     data/data_game.h
     data/data_groups.cpp
     data/data_groups.h
+    data/data_histories.cpp
+    data/data_histories.h
     data/data_location.cpp
     data/data_location.h
     data/data_media_rotation.cpp
@@ -423,6 +445,8 @@ PRIVATE
     history/view/media/history_view_call.cpp
     history/view/media/history_view_contact.h
     history/view/media/history_view_contact.cpp
+    history/view/media/history_view_dice.h
+    history/view/media/history_view_dice.cpp
     history/view/media/history_view_document.h
     history/view/media/history_view_document.cpp
     history/view/media/history_view_file.h
@@ -816,6 +840,8 @@ PRIVATE
     settings/settings_codes.h
     settings/settings_common.cpp
     settings/settings_common.h
+    settings/settings_folders.cpp
+    settings/settings_folders.h
     settings/settings_information.cpp
     settings/settings_information.h
     settings/settings_intro.cpp
@@ -846,6 +872,8 @@ PRIVATE
     storage/serialize_common.h
     storage/serialize_document.cpp
     storage/serialize_document.h
+    storage/storage_cloud_blob.cpp
+    storage/storage_cloud_blob.h
     storage/storage_facade.cpp
     storage/storage_facade.h
     # storage/storage_feed_messages.cpp
@@ -894,6 +922,10 @@ PRIVATE
     ui/countryinput.h
     ui/empty_userpic.cpp
     ui/empty_userpic.h
+    ui/filter_icons.cpp
+    ui/filter_icons.h
+    ui/filter_icon_panel.cpp
+    ui/filter_icon_panel.h
     ui/grouped_layout.cpp
     ui/grouped_layout.h
     ui/resize_area.h
@@ -922,6 +954,8 @@ PRIVATE
     window/window_connecting_widget.h
     window/window_controller.cpp
     window/window_controller.h
+    window/window_filters_menu.cpp
+    window/window_filters_menu.h
     window/window_history_hider.cpp
     window/window_history_hider.h
     window/window_lock_widgets.cpp
@@ -1153,7 +1187,7 @@ endif()
 
 set_target_properties(Telegram PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${output_folder})
 
-if ((NOT disable_autoupdate OR NOT LINUX) AND NOT build_macstore AND NOT build_winstore)
+if ((NOT DESKTOP_APP_DISABLE_AUTOUPDATE OR NOT LINUX) AND NOT build_macstore AND NOT build_winstore)
     add_executable(Updater WIN32)
     init_target(Updater)
 
@@ -1199,6 +1233,7 @@ endif()
 
 if (LINUX AND DESKTOP_APP_USE_PACKAGED)
     include(GNUInstallDirs)
+    configure_file("../lib/xdg/telegramdesktop.appdata.xml.in" "${CMAKE_CURRENT_BINARY_DIR}/telegramdesktop.appdata.xml" @ONLY)
     install(TARGETS Telegram RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}" BUNDLE DESTINATION "${CMAKE_INSTALL_BINDIR}")
     install(FILES "Resources/art/icon16.png" DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/16x16/apps" RENAME "telegram.png")
     install(FILES "Resources/art/icon32.png" DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/32x32/apps" RENAME "telegram.png")
@@ -1208,5 +1243,5 @@ if (LINUX AND DESKTOP_APP_USE_PACKAGED)
     install(FILES "Resources/art/icon256.png" DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/256x256/apps" RENAME "telegram.png")
     install(FILES "Resources/art/icon512.png" DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/512x512/apps" RENAME "telegram.png")
     install(FILES "../lib/xdg/telegramdesktop.desktop" DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/applications" RENAME "${TDESKTOP_LAUNCHER_BASENAME}.desktop")
-    install(FILES "../lib/xdg/telegramdesktop.appdata.xml" DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/metainfo" RENAME "${TDESKTOP_LAUNCHER_BASENAME}.appdata.xml")
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/telegramdesktop.appdata.xml" DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/metainfo" RENAME "${TDESKTOP_LAUNCHER_BASENAME}.appdata.xml")
 endif()

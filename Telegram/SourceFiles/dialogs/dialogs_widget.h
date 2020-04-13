@@ -41,7 +41,6 @@ class ConnectionState;
 
 namespace Dialogs {
 
-enum class Mode;
 struct RowDescriptor;
 class Row;
 class FakeRow;
@@ -63,7 +62,7 @@ public:
 
 	void refreshDialog(Key key);
 	void removeDialog(Key key);
-	void repaintDialogRow(Mode list, not_null<Row*> row);
+	void repaintDialogRow(FilterId filterId, not_null<Row*> row);
 	void repaintDialogRow(RowDescriptor row);
 
 	void jumpToTop();
@@ -85,8 +84,6 @@ public:
 	// Float player interface.
 	bool wheelEventFromFloatPlayer(QEvent *e) override;
 	QRect rectForFloatPlayer() const override;
-
-	void notify_historyMuteUpdated(History *history);
 
 	~Widget();
 
@@ -136,6 +133,7 @@ private:
 		const MTPcontacts_Found &result,
 		mtpRequestId requestId);
 	void escape();
+	void cancelSearchRequest();
 
 	void setupSupportMode();
 	void setupConnectingWidget();
@@ -180,6 +178,7 @@ private:
 	object_ptr<Ui::RpWidget> _searchControls;
 	object_ptr<HistoryView::TopBarWidget> _folderTopBar = { nullptr } ;
 	object_ptr<Ui::IconButton> _mainMenuToggle;
+	object_ptr<Ui::IconButton> _searchForNarrowFilters;
 	object_ptr<Ui::FlatInput> _filter;
 	object_ptr<Ui::FadeWrapScaled<Ui::IconButton>> _chooseFromUser;
 	object_ptr<Ui::FadeWrapScaled<Ui::IconButton>> _jumpToDate;
@@ -219,6 +218,7 @@ private:
 	int32 _searchNextRate = 0;
 	bool _searchFull = false;
 	bool _searchFullMigrated = false;
+	int _searchInHistoryRequest = 0; // Not real mtpRequestId.
 	mtpRequestId _searchRequest = 0;
 
 	QMap<QString, MTPmessages_Messages> _searchCache;

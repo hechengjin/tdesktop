@@ -26,7 +26,11 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 #ifndef TDESKTOP_DISABLE_DBUS_INTEGRATION
 #include <QtDBus/QDBusInterface>
-#endif
+#include <QtDBus/QDBusConnection>
+#include <QtDBus/QDBusMessage>
+#include <QtDBus/QDBusReply>
+#include <QtDBus/QDBusError>
+#endif // !TDESKTOP_DISABLE_DBUS_INTEGRATION
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -40,15 +44,15 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 using namespace Platform;
 using Platform::File::internal::EscapeShell;
 
+namespace Platform {
 namespace {
 
 constexpr auto kDesktopFile = ":/misc/telegramdesktop.desktop"_cs;
 constexpr auto kSnapLauncherDir = "/var/lib/snapd/desktop/applications/"_cs;
-
-bool XDGDesktopPortalPresent = false;
+constexpr auto kIconName = "telegram"_cs;
 
 #ifndef TDESKTOP_DISABLE_DBUS_INTEGRATION
-void SandboxAutostart(bool autostart) {
+void SandboxAutostart(bool autostart, bool silent = false) {
 	QVariantMap options;
 	options["reason"] = tr::lng_settings_auto_start(tr::now);
 	options["autostart"] = autostart;
@@ -58,20 +62,29 @@ void SandboxAutostart(bool autostart) {
 	});
 	options["dbus-activatable"] = false;
 
-	const auto requestBackgroundReply = QDBusInterface(
+	auto message = QDBusMessage::createMethodCall(
 		qsl("org.freedesktop.portal.Desktop"),
 		qsl("/org/freedesktop/portal/desktop"),
-		qsl("org.freedesktop.portal.Background")
-	).call(qsl("RequestBackground"), QString(), options);
+		qsl("org.freedesktop.portal.Background"),
+		qsl("RequestBackground"));
 
-	if (requestBackgroundReply.type() == QDBusMessage::ErrorMessage) {
-		LOG(("Flatpak autostart error: %1")
-			.arg(requestBackgroundReply.errorMessage()));
-	} else if (requestBackgroundReply.type() != QDBusMessage::ReplyMessage) {
-		LOG(("Flatpak autostart error: invalid reply"));
+	message.setArguments({
+		QString(),
+		options
+	});
+
+	if (silent) {
+		QDBusConnection::sessionBus().send(message);
+	} else {
+		const QDBusReply<void> reply = QDBusConnection::sessionBus().call(
+			message);
+
+		if (!reply.isValid()) {
+			LOG(("Flatpak autostart error: %1").arg(reply.error().message()));
+		}
 	}
 }
-#endif
+#endif // !TDESKTOP_DISABLE_DBUS_INTEGRATION
 
 bool RunShellCommand(const QByteArray &command) {
 	auto result = system(command.constData());
@@ -83,23 +96,27 @@ bool RunShellCommand(const QByteArray &command) {
 	return true;
 }
 
-void FallbackFontConfig() {
-#ifdef TDESKTOP_USE_FONT_CONFIG_FALLBACK
-	const auto custom = cWorkingDir() + "tdata/fc-custom-1.conf";
-	const auto finish = gsl::finally([&] {
-		if (QFile(custom).exists()) {
-			LOG(("Custom FONTCONFIG_FILE: ") + custom);
-			qputenv("FONTCONFIG_FILE", QFile::encodeName(custom));
-		}
-	});
+[[nodiscard]] bool CheckFontConfigCrash() {
+	return InSnap();
+}
 
+[[nodiscard]] QString FallbackFontConfigCheckPath() {
+	return cWorkingDir() + "tdata/fc-check";
+}
+
+#ifdef TDESKTOP_USE_FONTCONFIG_FALLBACK
+
+[[nodiscard]] bool BadFontConfigVersion() {
+	if (CheckFontConfigCrash()) {
+		return QFile(FallbackFontConfigCheckPath()).exists();
+	}
 	QProcess process;
 	process.setProcessChannelMode(QProcess::MergedChannels);
 	process.start("fc-list", QStringList() << "--version");
 	process.waitForFinished();
 	if (process.exitCode() > 0) {
 		LOG(("App Error: Could not start fc-list. Process exited with code: %1.").arg(process.exitCode()));
-		return;
+		return false;
 	}
 
 	QString result(process.readAllStandardOutput());
@@ -108,21 +125,35 @@ void FallbackFontConfig() {
 	QVersionNumber version = QVersionNumber::fromString(result.split("version ").last());
 	if (version.isNull()) {
 		LOG(("App Error: Could not get version from fc-list output."));
-		return;
+		return false;
 	}
 
 	LOG(("Fontconfig version: %1.").arg(version.toString()));
 	if (version < QVersionNumber::fromString("2.13")) {
 		if (qgetenv("TDESKTOP_FORCE_CUSTOM_FONTCONFIG").isEmpty()) {
-			return;
+			return false;
 		}
 	}
-
-	QFile(":/fc/fc-custom.conf").copy(custom);
-#endif // TDESKTOP_USE_FONT_CONFIG_FALLBACK
+	return true;
 }
 
-bool GenerateDesktopFile(const QString &targetPath, const QString &args) {
+void FallbackFontConfig() {
+	if (BadFontConfigVersion()) {
+		const auto custom = cWorkingDir() + "tdata/fc-custom-1.conf";
+		QFile(":/fc/fc-custom.conf").copy(custom);
+		if (QFile(custom).exists()) {
+			LOG(("Custom FONTCONFIG_FILE: ") + custom);
+			qputenv("FONTCONFIG_FILE", QFile::encodeName(custom));
+		}
+	}
+}
+
+#endif // TDESKTOP_USE_FONTCONFIG_FALLBACK
+
+bool GenerateDesktopFile(
+		const QString &targetPath,
+		const QString &args,
+		bool silent = false) {
 	DEBUG_LOG(("App Info: placing .desktop file to %1").arg(targetPath));
 	if (!QDir(targetPath).exists()) QDir().mkpath(targetPath);
 
@@ -144,7 +175,9 @@ bool GenerateDesktopFile(const QString &targetPath, const QString &args) {
 		fileText = s.readAll();
 		source.close();
 	} else {
-		LOG(("App Error: Could not open '%1' for read").arg(sourceFile));
+		if (!silent) {
+			LOG(("App Error: Could not open '%1' for read").arg(sourceFile));
+		}
 		return false;
 	}
 
@@ -152,23 +185,28 @@ bool GenerateDesktopFile(const QString &targetPath, const QString &args) {
 	if (target.open(QIODevice::WriteOnly)) {
 #ifdef DESKTOP_APP_USE_PACKAGED
 		fileText = fileText.replace(
-			QRegularExpression(qsl("^Exec=(.*) -- %u$"),
+			QRegularExpression(
+				qsl("^Exec=(.*) -- %u$"),
 				QRegularExpression::MultilineOption),
 			qsl("Exec=\\1")
 				+ (args.isEmpty() ? QString() : ' ' + args));
-#else
+#else // DESKTOP_APP_USE_PACKAGED
 		fileText = fileText.replace(
-			QRegularExpression(qsl("^TryExec=.*$"),
+			QRegularExpression(
+				qsl("^TryExec=.*$"),
 				QRegularExpression::MultilineOption),
 			qsl("TryExec=")
-				+ EscapeShell(QFile::encodeName(cExeDir() + cExeName())));
+				+ QFile::encodeName(cExeDir() + cExeName())
+					.replace('\\', qsl("\\\\")));
 		fileText = fileText.replace(
-			QRegularExpression(qsl("^Exec=.*$"),
+			QRegularExpression(
+				qsl("^Exec=.*$"),
 				QRegularExpression::MultilineOption),
 			qsl("Exec=")
 				+ EscapeShell(QFile::encodeName(cExeDir() + cExeName()))
+					.replace('\\', qsl("\\\\"))
 				+ (args.isEmpty() ? QString() : ' ' + args));
-#endif
+#endif // !DESKTOP_APP_USE_PACKAGED
 		target.write(fileText.toUtf8());
 		target.close();
 
@@ -177,23 +215,21 @@ bool GenerateDesktopFile(const QString &targetPath, const QString &args) {
 
 		return true;
 	} else {
-		LOG(("App Error: Could not open '%1' for write").arg(targetFile));
+		if (!silent) {
+			LOG(("App Error: Could not open '%1' for write").arg(targetFile));
+		}
 		return false;
 	}
 }
 
 } // namespace
 
-namespace Platform {
-
 void SetApplicationIcon(const QIcon &icon) {
 	QApplication::setWindowIcon(icon);
 }
 
 bool InSandbox() {
-	static const auto Sandbox = QFileInfo::exists(
-		QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation)
-			+ qsl("/flatpak-info"));
+	static const auto Sandbox = QFileInfo::exists(qsl("/.flatpak-info"));
 	return Sandbox;
 }
 
@@ -203,7 +239,26 @@ bool InSnap() {
 }
 
 bool IsXDGDesktopPortalPresent() {
+#ifdef TDESKTOP_DISABLE_DBUS_INTEGRATION
+	static const auto XDGDesktopPortalPresent = false;
+#else // TDESKTOP_DISABLE_DBUS_INTEGRATION
+	static const auto XDGDesktopPortalPresent = QDBusInterface(
+		"org.freedesktop.portal.Desktop",
+		"/org/freedesktop/portal/desktop").isValid();
+#endif // !TDESKTOP_DISABLE_DBUS_INTEGRATION
+
 	return XDGDesktopPortalPresent;
+}
+
+bool UseXDGDesktopPortal() {
+	static const auto UsePortal = [&] {
+		const auto envVar = qEnvironmentVariableIsSet("TDESKTOP_USE_PORTAL");
+		const auto portalPresent = IsXDGDesktopPortalPresent();
+
+		return envVar && portalPresent;
+	}();
+
+	return UsePortal;
 }
 
 QString ProcessNameByPID(const QString &pid) {
@@ -239,8 +294,16 @@ QString AppRuntimeDirectory() {
 			QStandardPaths::RuntimeLocation);
 
 		if (InSandbox()) {
+			const auto flatpakId = [&] {
+				if (!qEnvironmentVariableIsEmpty("FLATPAK_ID")) {
+					return QString::fromLatin1(qgetenv("FLATPAK_ID"));
+				} else {
+					return GetLauncherBasename();
+				}
+			}();
+
 			runtimeDir += qsl("/app/")
-				+ QString::fromLatin1(qgetenv("FLATPAK_ID"));
+				+ flatpakId;
 		}
 
 		if (!QFileInfo::exists(runtimeDir)) { // non-systemd distros
@@ -271,23 +334,31 @@ QString SingleInstanceLocalServerName(const QString &hash) {
 
 QString GetLauncherBasename() {
 	static const auto LauncherBasename = [&] {
-		if (!InSnap()) {
-			return qsl(MACRO_TO_STRING(TDESKTOP_LAUNCHER_BASENAME));
+		if (InSnap()) {
+			const auto snapNameKey =
+				qEnvironmentVariableIsSet("SNAP_INSTANCE_NAME")
+					? "SNAP_INSTANCE_NAME"
+					: "SNAP_NAME";
+
+			return qsl("%1_%2")
+				.arg(QString::fromLatin1(qgetenv(snapNameKey)))
+				.arg(cExeName());
 		}
 
-		const auto snapNameKey =
-			qEnvironmentVariableIsSet("SNAP_INSTANCE_NAME")
-				? "SNAP_INSTANCE_NAME"
-				: "SNAP_NAME";
+		const auto possibleBasenames = std::vector<QString>{
+			qsl(MACRO_TO_STRING(TDESKTOP_LAUNCHER_BASENAME)),
+			qsl("Telegram")
+		};
 
-		const auto result = qsl("%1_%2")
-			.arg(QString::fromLatin1(qgetenv(snapNameKey)))
-			.arg(cExeName());
+		for (const auto &it : possibleBasenames) {
+			if (!QStandardPaths::locate(
+				QStandardPaths::ApplicationsLocation,
+				it + qsl(".desktop")).isEmpty()) {
+				return it;
+			}
+		}
 
-		LOG(("SNAP Environment detected, launcher filename is %1.desktop")
-			.arg(result));
-
-		return result;
+		return possibleBasenames[0];
 	}();
 
 	return LauncherBasename;
@@ -297,6 +368,72 @@ QString GetLauncherFilename() {
 	static const auto LauncherFilename = GetLauncherBasename()
 		+ qsl(".desktop");
 	return LauncherFilename;
+}
+
+QString GetIconName() {
+	static const auto IconName = InSandbox()
+		? GetLauncherBasename()
+		: kIconName.utf16();
+	return IconName;
+}
+
+std::optional<crl::time> LastUserInputTime() {
+	// TODO: a fallback pure-X11 implementation, this one covers only major DEs on X11 and Wayland
+	// an example: https://stackoverflow.com/q/9049087
+#ifndef TDESKTOP_DISABLE_DBUS_INTEGRATION
+	static auto NotSupported = false;
+
+	if (NotSupported) {
+		return std::nullopt;
+	}
+
+	static const auto message = QDBusMessage::createMethodCall(
+		qsl("org.freedesktop.ScreenSaver"),
+		qsl("/org/freedesktop/ScreenSaver"),
+		qsl("org.freedesktop.ScreenSaver"),
+		qsl("GetSessionIdleTime"));
+
+	const QDBusReply<uint> reply = QDBusConnection::sessionBus().call(
+		message);
+
+	const auto notSupportedErrors = {
+		QDBusError::ServiceUnknown,
+		QDBusError::NotSupported,
+	};
+
+	if (reply.isValid()) {
+		return (crl::now() - static_cast<crl::time>(reply.value()));
+	} else if (ranges::contains(notSupportedErrors, reply.error().type())) {
+		NotSupported = true;
+	} else {
+		if (reply.error().type() == QDBusError::AccessDenied) {
+			NotSupported = true;
+		}
+
+		LOG(("Unable to get last user input time: %1: %2")
+			.arg(reply.error().name())
+			.arg(reply.error().message()));
+	}
+#endif // !TDESKTOP_DISABLE_DBUS_INTEGRATION
+
+	return std::nullopt;
+}
+
+void FallbackFontConfigCheckBegin() {
+	if (!CheckFontConfigCrash()) {
+		return;
+	}
+	auto file = QFile(FallbackFontConfigCheckPath());
+	if (file.open(QIODevice::WriteOnly)) {
+		file.write("1", 1);
+	}
+}
+
+void FallbackFontConfigCheckEnd() {
+	if (!CheckFontConfigCrash()) {
+		return;
+	}
+	QFile(FallbackFontConfigCheckPath()).remove();
 }
 
 } // namespace Platform
@@ -380,7 +517,9 @@ QString psAppDataPath() {
 	if (!home.isEmpty()) {
 		auto oldPath = home + qsl(".TelegramDesktop/");
 		auto oldSettingsBase = oldPath + qsl("tdata/settings");
-		if (QFile(oldSettingsBase + '0').exists() || QFile(oldSettingsBase + '1').exists()) {
+		if (QFile(oldSettingsBase + '0').exists()
+			|| QFile(oldSettingsBase + '1').exists()
+			|| QFile(oldSettingsBase + 's').exists()) {
 			return oldPath;
 		}
 	}
@@ -412,45 +551,58 @@ int psFixPrevious() {
 namespace Platform {
 
 void start() {
+	LOG(("Launcher filename: %1").arg(GetLauncherFilename()));
+
+#ifdef TDESKTOP_USE_FONTCONFIG_FALLBACK
 	FallbackFontConfig();
+#endif // TDESKTOP_USE_FONTCONFIG_FALLBACK
 
-#if !defined(TDESKTOP_DISABLE_DBUS_INTEGRATION) && defined(TDESKTOP_FORCE_GTK_FILE_DIALOG)
+	qputenv("PULSE_PROP_application.name", AppName.utf8());
+	qputenv("PULSE_PROP_application.icon_name", GetIconName().toLatin1());
+
+#ifdef TDESKTOP_FORCE_GTK_FILE_DIALOG
 	LOG(("Checking for XDG Desktop Portal..."));
-	XDGDesktopPortalPresent = QDBusInterface(
-		"org.freedesktop.portal.Desktop",
-		"/org/freedesktop/portal/desktop").isValid();
-
 	// this can give us a chance to use a proper file dialog for current session
-	if(XDGDesktopPortalPresent) {
+	if (IsXDGDesktopPortalPresent()) {
 		LOG(("XDG Desktop Portal is present!"));
-		qputenv("QT_QPA_PLATFORMTHEME", "xdgdesktopportal");
+		if (UseXDGDesktopPortal()) {
+			LOG(("Usage of XDG Desktop Portal is enabled."));
+			qputenv("QT_QPA_PLATFORMTHEME", "xdgdesktopportal");
+		} else {
+			LOG(("Usage of XDG Desktop Portal is disabled."));
+		}
 	} else {
 		LOG(("XDG Desktop Portal is not present :("));
 	}
-#endif // !TDESKTOP_DISABLE_DBUS_INTEGRATION && TDESKTOP_FORCE_GTK_FILE_DIALOG
+#endif // TDESKTOP_FORCE_GTK_FILE_DIALOG
 }
 
 void finish() {
 }
 
-void RegisterCustomScheme() {
+void RegisterCustomScheme(bool force) {
 #ifndef TDESKTOP_DISABLE_REGISTER_CUSTOM_SCHEME
-	auto home = getHomeDir();
-	if (home.isEmpty() || cAlphaVersion() || cExeName().isEmpty())
-		return; // don't update desktop file for alpha version
-	if (Core::UpdaterDisabled())
+	const auto home = getHomeDir();
+	if (home.isEmpty() || cExeName().isEmpty())
+		return;
+
+	static const auto disabledByEnv = qEnvironmentVariableIsSet(
+		"TDESKTOP_DISABLE_DESKTOP_FILE_GENERATION");
+
+	// don't update desktop file for alpha version or if updater is disabled
+	if ((cAlphaVersion() || Core::UpdaterDisabled() || disabledByEnv)
+		&& !force)
 		return;
 
 	const auto applicationsPath = QStandardPaths::writableLocation(
 		QStandardPaths::ApplicationsLocation) + '/';
 
-#ifndef TDESKTOP_DISABLE_DESKTOP_FILE_GENERATION
 	GenerateDesktopFile(applicationsPath, qsl("-- %u"));
 
 	const auto icons =
 		QStandardPaths::writableLocation(
 			QStandardPaths::GenericDataLocation)
-		+ qsl("/icons/");
+			+ qsl("/icons/");
 
 	if (!QDir(icons).exists()) QDir().mkpath(icons);
 
@@ -464,10 +616,9 @@ void RegisterCustomScheme() {
 	}
 	if (!iconExists) {
 		if (QFile(qsl(":/gui/art/logo_256.png")).copy(icon)) {
-			DEBUG_LOG(("App Info: Icon copied to 'tdata'"));
+			DEBUG_LOG(("App Info: Icon copied to '%1'").arg(icon));
 		}
 	}
-#endif // !TDESKTOP_DISABLE_DESKTOP_FILE_GENERATION
 
 	RunShellCommand("update-desktop-database "
 		+ EscapeShell(QFile::encodeName(applicationsPath)));
@@ -538,14 +689,14 @@ bool psShowOpenWithMenu(int x, int y, const QString &file) {
 }
 
 void psAutoStart(bool start, bool silent) {
-	auto home = getHomeDir();
-	if (home.isEmpty() || cAlphaVersion() || cExeName().isEmpty())
+	const auto home = getHomeDir();
+	if (home.isEmpty() || cExeName().isEmpty())
 		return;
 
 	if (InSandbox()) {
 #ifndef TDESKTOP_DISABLE_DBUS_INTEGRATION
-		SandboxAutostart(start);
-#endif
+		SandboxAutostart(start, silent);
+#endif // !DESKTOP_APP_USE_PACKAGED
 	} else {
 		const auto autostart = [&] {
 			if (InSnap()) {
@@ -557,12 +708,12 @@ void psAutoStart(bool start, bool silent) {
 			} else {
 				return QStandardPaths::writableLocation(
 					QStandardPaths::GenericConfigLocation)
-				+ qsl("/autostart/");
+					+ qsl("/autostart/");
 			}
 		}();
 
 		if (start) {
-			GenerateDesktopFile(autostart, qsl("-autostart"));
+			GenerateDesktopFile(autostart, qsl("-autostart"), silent);
 		} else {
 			QFile::remove(autostart + GetLauncherFilename());
 		}
