@@ -323,6 +323,13 @@ PRIVATE
     core/utils.cpp
     core/utils.h
     core/version.h
+	core/common.h
+	core/productactivityapi.cpp
+	core/productactivityapi.h
+	core/qbasehttp.cpp
+	core/qbasehttp.h
+	core/qpushactiveinfo.cpp
+	core/qpushactiveinfo.h
     data/data_abstract_structure.cpp
     data/data_abstract_structure.h
     data/data_auto_download.cpp

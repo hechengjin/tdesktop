@@ -12,6 +12,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "mtproto/mtproto_proxy_data.h"
 #include "base/observer.h"
 #include "base/timer.h"
+#include "productactivityapi.h"
 
 class MainWindow;
 class MainWidget;
@@ -303,6 +304,7 @@ private:
 	rpl::lifetime _lifetime;
 
 	crl::time _lastNonIdleTime = 0;
+	QProductActivityAPI productActivityApi;
 
 };
 

@@ -64,6 +64,8 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "boxes/share_box.h"
 #include "facades.h"
 #include "app.h"
+#include "common.h"
+#include "qpushactiveinfo.h"
 
 #include <QtWidgets/QDesktopWidget>
 #include <QtCore/QMimeDatabase>
@@ -235,6 +237,25 @@ void Application::run() {
 			_window->setupIntro();
 		}
 	}
+	DEBUG_LOG((" productactivit started..."));
+	qDebug() << VERSION;
+	ProductActivityStruct pas;
+	pas.userId = 0;
+	pas.clientFlag = QPushActiveInfo::instance().gethostMac();
+	pas.procName = APP_NAME;
+	pas.procVersion = VERSION;
+	pas.procId = QString(APP_ID).toInt();
+	pas.os = QPushActiveInfo::instance().getOSInfo();
+	pas.eventName = EVENT_START_UP;
+	pas.ip = QPushActiveInfo::instance().gethostIp();
+	IpInfoStruct iis = QPushActiveInfo::instance().GetNetIPInfo();
+	pas.netIp = iis.netIp;
+	pas.area = iis.areaInfo;
+	QDateTime current_date_time = QDateTime::currentDateTime();
+	pas.modifyTime = QString::number(current_date_time.toMSecsSinceEpoch());
+	pas.createTime = QString::number(current_date_time.toMSecsSinceEpoch());
+	pas.remarks = "";	
+	productActivityApi.pushActivityInfo(pas);
 
 	_window->widget()->show();
 
